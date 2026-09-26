@@ -255,6 +255,15 @@
         .confidence small { color: var(--muted); }
         .results .row-actions { justify-content: center; }
 
+        /* Past results */
+        textarea.input { resize: vertical; min-height: 84px; font-family: ui-monospace, 'Courier New', monospace; font-size: 0.9rem; }
+        .draw-list { display: grid; gap: 0.35rem; margin-top: 0.6rem; }
+        .draw-item { display: flex; align-items: center; gap: 0.6rem; background: rgba(0, 0, 0, 0.3); border-radius: 0.5rem; padding: 0.3rem 0.4rem 0.3rem 0.7rem; font-size: 0.85rem; }
+        .draw-item .d-date { color: var(--muted); min-width: 6.2rem; font-variant-numeric: tabular-nums; }
+        .draw-item .d-nums { flex: 1; font-family: ui-monospace, 'Courier New', monospace; word-break: break-word; }
+        .draw-error { color: #fca5a5; font-size: 0.85rem; white-space: pre-line; margin-top: 0.4rem; }
+        .match-ok { color: #86efac; font-weight: 700; }
+
         /* History */
         .history-list { display: grid; gap: 0.6rem; margin-top: 0.6rem; }
         .history-item { background: rgba(0, 0, 0, 0.3); border-radius: 0.6rem; padding: 0.6rem 0.75rem; display: grid; grid-template-columns: 1fr auto; gap: 0.2rem 0.6rem; }
@@ -369,7 +378,24 @@
             <summary style="color:#d8b4fe">✨ Today's cosmic numbers</summary>
             <div class="box-body">
                 <div class="cats" id="cats"></div>
-                <p class="hint" style="margin-top:0.6rem">Hot/cold figures are <strong>simulated</strong>. Astro &amp; prime picks refresh every draw.</p>
+                <p class="hint" style="margin-top:0.6rem" id="catsHint"></p>
+            </div>
+        </details>
+
+        <details class="box" id="drawsBox" style="background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.35);">
+            <summary style="color:#86efac">📊 Past winning numbers <span class="profile-summary" id="drawsSummary"></span></summary>
+            <div class="box-body">
+                <p class="hint" id="drawsHelp"></p>
+                <label class="field-label" for="drawsInput" style="margin-top:0.7rem">Winning numbers — one draw per line</label>
+                <textarea class="input" id="drawsInput" rows="3" spellcheck="false" autocomplete="off"></textarea>
+                <div class="row-actions">
+                    <label class="field-label" for="drawDate" style="margin:0">Draw date</label>
+                    <input class="input" type="date" id="drawDate" style="width:auto">
+                    <button class="btn btn-primary" id="addDraws">➕ Add results</button>
+                </div>
+                <p class="draw-error" id="drawsError"></p>
+                <div class="draw-list" id="drawList"></div>
+                <div class="row-actions"><button class="btn btn-ghost btn-small" id="clearDraws">Clear all results for this game</button></div>
             </div>
         </details>
     </section>
@@ -410,6 +436,9 @@
             <label class="toggle" id="balancedWrap" title="Rejects lines that are all odd/even or all low/high">
                 <input type="checkbox" id="balanced"> Balanced mix (odd/even &amp; low/high)
             </label>
+            <label class="toggle hidden" id="avoidPastWrap" title="Skips any line that exactly matches one of your entered past results">
+                <input type="checkbox" id="avoidPast"> Avoid past winning lines
+            </label>
         </div>
         <button class="btn btn-primary btn-big" id="generateBtn">🎲 Generate my numbers</button>
         <div class="analysis hidden" id="analysis" aria-live="polite">
@@ -433,7 +462,7 @@
     <footer class="disclaimer">
         <p>⚠️ For entertainment purposes only. Every draw is random — no method here changes your odds.</p>
         <p>But hey, it combines quantum physics, astrology, personal numerology AND reverse cosmic fields — it's got to work, right? 🤓✨🔮</p>
-        <p>📊 Hot/cold numbers are simulated, not real draw history. Draw times shown in your local time zone; always confirm game rules with your official lottery operator.</p>
+        <p>📊 Hot/cold numbers are simulated unless you enter past winning numbers. Draw times shown in your local time zone; always confirm game rules with your official lottery operator.</p>
     </footer>
 
 </main>
@@ -458,6 +487,7 @@
             <li><strong>Must include</strong> = "complete my ticket": lock your favourites and let the engine fill the rest.</li>
             <li><strong>Digit games</strong> let you fix a digit to a specific position.</li>
             <li><strong>Category dots</strong> show which cosmic group a number belongs to.</li>
+            <li><strong>Past winning numbers</strong> — paste recent results from your official results page. The app then uses real hot/cold stats, can avoid past winning lines, and checks your saved tickets against the matching draw.</li>
             <li><strong>Odds</strong> shown are the real mathematical odds for one line.</li>
         </ul>
 
@@ -547,8 +577,11 @@ const state = {
     custom: { pick: 6, min: 1, max: 49, bonusMax: 0 },
     profile: null,          // { first, last, birth: 'YYYY-MM-DD' }
     selections: {},         // per game: { locked, excluded, tracked, posLocks, bonusLock }
-    history: []
+    history: [],
+    avoidPast: false,
+    draws: {}               // per game: [{ date: 'YYYY-MM-DD' | null, nums, bonus, added }]
 };
+let drawsRev = 0;           // bumps whenever past results change (invalidates caches)
 let results = null;         // last generated result (not persisted)
 let busy = false;
 
@@ -672,6 +705,14 @@ function loadState() {
     if (saved.profile && saved.profile.first && /^\d{4}-\d{2}-\d{2}$/.test(saved.profile.birth)) state.profile = saved.profile;
     if (saved.selections && typeof saved.selections === 'object') state.selections = saved.selections;
     if (Array.isArray(saved.history)) state.history = saved.history.slice(0, 30);
+    state.avoidPast = !!saved.avoidPast;
+    if (saved.draws && typeof saved.draws === 'object') {
+        Object.entries(saved.draws).forEach(([id, list]) => {
+            if (GAMES[id] && Array.isArray(list)) {
+                state.draws[id] = list.filter(d => d && Array.isArray(d.nums) && d.nums.every(Number.isInteger)).slice(0, 500);
+            }
+        });
+    }
 }
 
 /* ================================================================
@@ -837,11 +878,83 @@ function personalNumbers(g) {
     return out.slice(0, 8).sort(byNum);
 }
 
+/* ================================================================
+   PAST RESULTS (entered by the user)
+   ================================================================ */
+function drawCount(g) {
+    return g.keno ? g.keno.drawn : g.pick;
+}
+
+function gameDraws() {
+    if (!state.draws[state.gameId]) state.draws[state.gameId] = [];
+    return state.draws[state.gameId];
+}
+
+// Valid for the current game settings, newest first (undated entries last)
+function validDraws(g, list = gameDraws()) {
+    const count = drawCount(g);
+    return list
+        .filter(d => d.nums.length === count && d.nums.every(n => n >= g.min && n <= g.max))
+        .sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.added - a.added);
+}
+
+function previousDrawDate(g, now = new Date()) {
+    if (!g.days.length) return ymd(now);
+    for (let d = 0; d <= 7; d++) {
+        const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - d);
+        if (!g.days.includes(day.getDay())) continue;
+        const done = g.times.some(t => { const dt = new Date(day); dt.setHours(t.h, t.m, 0, 0); return dt <= now; });
+        if (done) return ymd(day);
+    }
+    return ymd(now);
+}
+
+function parseDrawLine(line, g) {
+    let text = line.trim();
+    let date = null;
+    const m = text.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+    if (m) {
+        date = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+        text = text.slice(m[0].length);
+    }
+    const plusAt = text.indexOf('+');
+    const mainPart = plusAt > -1 ? text.slice(0, plusAt) : text;
+    const bonusPart = plusAt > -1 ? text.slice(plusAt + 1) : null;
+    const count = drawCount(g);
+    const unit = g.digit ? 'digits' : 'numbers';
+
+    let tokens = mainPart.match(/\d+/g) || [];
+    if (g.digit) tokens = tokens.join('').split('').filter(Boolean);
+    const nums = tokens.map(Number);
+    let bonus = bonusPart != null && /\d/.test(bonusPart) ? Number(bonusPart.match(/\d+/)[0]) : null;
+
+    // A trailing extra number is the bonus ball (kept for bonus games, ignored otherwise)
+    if (bonusPart == null && !g.digit && nums.length === count + 1) {
+        const last = nums.pop();
+        if (g.bonus) bonus = last;
+    }
+    if (!nums.length) return { error: `no ${unit} found` };
+    if (nums.length !== count) return { error: `needs ${count} ${unit}, found ${nums.length}` };
+    if (nums.some(n => n < g.min || n > g.max)) return { error: `${unit} must be ${g.min}-${g.max}` };
+    if (!g.digit && new Set(nums).size !== nums.length) return { error: 'a number appears twice' };
+    if (g.bonus && bonus != null && (bonus < g.bonus.min || bonus > g.bonus.max)) return { error: `${g.bonus.name} must be ${g.bonus.min}-${g.bonus.max}` };
+    if (!g.bonus) bonus = null;
+    return { date, nums: g.digit ? nums : nums.sort(byNum), bonus };
+}
+
+function exampleDrawLine(g) {
+    const count = drawCount(g);
+    if (g.digit) return range(0, count - 1).map(i => (i * 3 + 4) % 10).join('-');
+    const step = (g.max - g.min) / count;
+    const nums = range(0, count - 1).map(i => Math.round(g.min + step * i + step / 2));
+    return nums.map(n => pad(n, g)).join(' ') + (g.bonus ? ` + ${Math.ceil(g.bonus.max / 3)}` : '');
+}
+
 let categoryCache = { key: '', value: null };
 function categories(g, draw) {
     const profileKey = state.profile ? `${state.profile.first}|${state.profile.last}|${state.profile.birth}` : '';
     const today = new Date();
-    const key = [state.gameId, g.min, g.max, draw.cycle, ymd(today), profileKey].join('|');
+    const key = [state.gameId, g.min, g.max, g.pick, draw.cycle, ymd(today), profileKey, drawsRev].join('|');
     if (categoryCache.key === key) return categoryCache.value;
 
     const nums = range(g.min, g.max);
@@ -850,6 +963,25 @@ function categories(g, draw) {
     // Simulated long-run frequency, stable per game
     const freqRng = seeded(`${state.gameId}|${g.min}-${g.max}|freq`);
     const freq = new Map(nums.map(n => [n, 0.5 + freqRng()]));
+
+    // Real frequency from the user's past results replaces the simulation
+    const draws = validDraws(g);
+    let stats = null;
+    if (draws.length) {
+        const counts = new Map(nums.map(n => [n, 0]));
+        const lastAgo = new Map();
+        draws.forEach((d, idx) => d.nums.forEach(n => {
+            counts.set(n, counts.get(n) + 1);
+            if (!lastAgo.has(n)) lastAgo.set(n, idx);
+        }));
+        // Count first, then recency, then the simulated value as a final tie-breaker
+        const score = new Map(nums.map(n => [n, counts.get(n) + (lastAgo.has(n) ? (draws.length - lastAgo.get(n)) / (draws.length + 1) * 0.5 : 0) + freq.get(n) * 0.001]));
+        const lo = Math.min(...score.values());
+        const hi = Math.max(...score.values());
+        nums.forEach(n => freq.set(n, 0.5 + (score.get(n) - lo) / (hi - lo || 1)));
+        stats = { counts, lastAgo, total: draws.length };
+    }
+    const pastKeys = new Set(g.keno ? [] : draws.map(d => d.nums.join(',')));
     const byFreq = [...nums].sort((a, b) => freq.get(b) - freq.get(a));
 
     // Astro-favorable: stable for the whole draw cycle
@@ -867,7 +999,9 @@ function categories(g, draw) {
         cold: byFreq.slice(-size).sort(byNum),
         astro: astro.sort(byNum),
         prime: prime.sort(byNum),
-        personal: personalNumbers(g)
+        personal: personalNumbers(g),
+        stats,
+        pastKeys
     };
     value.sets = Object.fromEntries(CATEGORY_KEYS.map(k => [k, new Set(value[k])]));
     categoryCache = { key, value };
@@ -976,7 +1110,8 @@ async function generate() {
         let t;
         for (let attempt = 0; attempt < 30; attempt++) {
             t = { nums: g.digit ? makeDigitLine(g, s, cats) : makeNumberLine(g, s, cats), bonus: makeBonus(g, s) };
-            if (!seen.has(ticketText(g, t))) break;
+            const isPast = state.avoidPast && cats.pastKeys.has(t.nums.join(','));
+            if (!seen.has(ticketText(g, t)) && !isPast) break;
         }
         seen.add(ticketText(g, t));
         tickets.push(t);
@@ -987,6 +1122,7 @@ async function generate() {
         method: METHODS.find(m => m.id === state.method),
         tickets,
         draw: draw.text,
+        cycle: draw.cycle,
         playType: g.playTypes ? state.playType : null,
         confidence: 85 + Math.floor(rand() * 15),
         locked: new Set(g.digit ? s.posLocks.filter(d => d != null) : s.locked),
@@ -1090,6 +1226,9 @@ function renderProfile() {
 }
 
 function renderCats(g, cats) {
+    $('catsHint').innerHTML = cats.stats
+        ? `Hot/cold calculated from your <strong>${cats.stats.total}</strong> entered result${cats.stats.total > 1 ? 's' : ''}${cats.stats.total < 10 ? ' — add more draws for better stats' : ''}. Astro &amp; prime picks refresh every draw.`
+        : 'Hot/cold figures are <strong>simulated</strong> — add past winning numbers below to use real ones. Astro &amp; prime picks refresh every draw.';
     $('cats').innerHTML = CATEGORY_KEYS.map(k => {
         const nums = cats[k];
         const body = nums.length
@@ -1116,6 +1255,10 @@ function buildGrid(g, cats) {
         const dots = catList.map(k => `<span class="dot ${k}"></span>`).join('');
         b.innerHTML = `${dots ? `<span class="num-dots">${dots}</span>` : ''}${pad(n, g)}`;
         b.dataset.cats = catList.map(k => CATEGORY_INFO[k].label).join(', ');
+        if (cats.stats) {
+            const ago = cats.stats.lastAgo.get(n);
+            b.dataset.stat = `drawn ${cats.stats.counts.get(n)}× in ${cats.stats.total} results, ${ago == null ? 'not seen yet' : ago === 0 ? 'in the latest draw' : `last seen ${ago} draw${ago > 1 ? 's' : ''} ago`}`;
+        }
         gridButtons.set(n, b);
         frag.appendChild(b);
     });
@@ -1135,7 +1278,7 @@ function refreshGrid() {
         b.classList.toggle('is-excluded', isX);
         b.classList.toggle('is-tracked', isT);
         const flags = [isL && 'must include', isX && 'never use', isT && 'tracked'].filter(Boolean);
-        const catText = b.dataset.cats ? ` • ${b.dataset.cats}` : '';
+        const catText = (b.dataset.cats ? ` • ${b.dataset.cats}` : '') + (b.dataset.stat ? ` • ${b.dataset.stat}` : '');
         b.title = `${n}${flags.length ? ' — ' + flags.join(', ') : ''}${catText}`;
         b.setAttribute('aria-pressed', String(state.tool === 'lock' ? isL : state.tool === 'exclude' ? isX : isT));
     });
@@ -1223,6 +1366,9 @@ function renderGenerate(g) {
     $('linesPlus').disabled = state.lines >= MAX_LINES;
     $('balanced').checked = state.balanced;
     $('balancedWrap').classList.toggle('hidden', !!g.digit || g.pick < 4);
+    const cats = categories(g, nextDraw(g));
+    $('avoidPast').checked = state.avoidPast;
+    $('avoidPastWrap').classList.toggle('hidden', !cats.pastKeys.size);
 }
 
 function ballHtml(n, g, r, extraClass = '') {
@@ -1280,6 +1426,91 @@ function renderResults() {
     panel.classList.remove('hidden');
 }
 
+// Compare a saved ticket with the entered result for its draw date
+function historyLines(h) {
+    const plain = h.lines.map(escapeHtml);
+    if (!h.gameId || !h.cycle || !Array.isArray(h.tickets)) return plain.join('\n');
+    const d = (state.draws[h.gameId] || []).find(x => x.date === h.cycle);
+    if (!d) {
+        const hint = h.cycle <= ymd(new Date()) ? `\n<span class="meta">Add the ${escapeHtml(h.cycle)} result under 📊 Past winning numbers to check this ticket.</span>` : '';
+        return plain.join('\n') + hint;
+    }
+    return plain.map((line, i) => {
+        const t = h.tickets[i];
+        if (!t) return line;
+        let res;
+        if (h.digit) {
+            const straight = t.nums.join() === d.nums.join();
+            const box = t.nums.slice().sort(byNum).join() === d.nums.slice().sort(byNum).join();
+            res = straight ? '🎉 exact match!' : box ? '🎉 box match (any order)' : 'no match';
+        } else {
+            const hits = t.nums.filter(n => d.nums.includes(n)).length;
+            const bonusHit = t.bonus != null && d.bonus != null && t.bonus === d.bonus;
+            res = `${hits}/${t.nums.length} matched${bonusHit ? ' + bonus' : ''}`;
+            if (hits >= Math.ceil(t.nums.length / 2) || bonusHit) res = `🎉 ${res}`;
+        }
+        return `${line}  <span class="${res.startsWith('🎉') ? 'match-ok' : 'meta'}">→ ${res}</span>`;
+    }).join('\n') + `\n<span class="meta">Checked against the ${escapeHtml(h.cycle)} draw: ${d.nums.map(n => (h.digit ? n : String(n).padStart(2, '0'))).join(h.digit ? '-' : ' ')}${d.bonus != null ? ' + ' + d.bonus : ''}</span>`;
+}
+
+function renderDraws() {
+    const g = currentGame();
+    const list = validDraws(g);
+    const count = drawCount(g);
+    const unit = g.digit ? 'digits' : 'numbers';
+    let help = `Copy recent results from your official results page — ${count} ${unit} per line, newest first. Start a line with a date (YYYY-MM-DD) or use the date field for a single draw.`;
+    if (g.bonus) help += ` Add the ${g.bonus.name} after a + sign (optional).`;
+    else if (!g.digit && !g.keno) help += ' A bonus number at the end is accepted and ignored.';
+    $('drawsHelp').textContent = help;
+    $('drawsInput').placeholder = `${previousDrawDate(g)} ${exampleDrawLine(g)}\n${exampleDrawLine(g)}`;
+    $('drawDate').value = previousDrawDate(g);
+    $('drawsSummary').textContent = list.length ? `— ${list.length} entered${list[0].date ? `, latest ${list[0].date}` : ''}` : '— none yet';
+    $('clearDraws').classList.toggle('hidden', !list.length);
+
+    const shown = list.slice(0, 15);
+    $('drawList').innerHTML = shown.map(d => `
+        <div class="draw-item">
+            <span class="d-date">${d.date || 'no date'}</span>
+            <span class="d-nums">${d.nums.map(n => pad(n, g)).join(g.digit ? '-' : ' ')}${d.bonus != null ? ` + ${d.bonus}` : ''}</span>
+            <button class="btn btn-ghost btn-small" data-ddel="${d.added}" aria-label="Delete this result">🗑️</button>
+        </div>`).join('') + (list.length > shown.length ? `<p class="hint">…and ${list.length - shown.length} older results (all are used in the stats).</p>` : '');
+}
+
+function addDraws() {
+    const g = currentGame();
+    const lines = $('drawsInput').value.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return toast('Enter at least one line of winning numbers.');
+    const list = gameDraws();
+    const errors = [];
+    const failed = [];
+    let added = 0;
+    let dupes = 0;
+    const now = Date.now();
+    lines.forEach((line, i) => {
+        const r = parseDrawLine(line, g);
+        if (r.error) { errors.push(`Line ${i + 1}: ${r.error}`); failed.push(line); return; }
+        if (!r.date && lines.length === 1) r.date = $('drawDate').value || null;
+        const key = `${r.date}|${r.nums.join(',')}`;
+        if (list.some(d => `${d.date}|${d.nums.join(',')}` === key)) { dupes++; return; }
+        list.push({ ...r, added: now - i });   // first line = newest
+        added++;
+    });
+    if (list.length > 500) list.splice(0, list.length - 500);
+    $('drawsError').textContent = errors.join('\n');
+    $('drawsInput').value = failed.join('\n');
+    if (added) {
+        drawsRev++;
+        saveState();
+        renderGame();
+        renderHistory();
+    }
+    const parts = [];
+    if (added) parts.push(`📊 ${added} result${added > 1 ? 's' : ''} added`);
+    if (dupes) parts.push(`${dupes} already there`);
+    if (errors.length) parts.push(`${errors.length} need fixing`);
+    toast(parts.join(' • ') || 'Nothing added');
+}
+
 function renderHistory() {
     $('historyCount').textContent = state.history.length;
     $('clearHistory').classList.toggle('hidden', !state.history.length);
@@ -1290,7 +1521,7 @@ function renderHistory() {
     $('historyList').innerHTML = state.history.map((h, i) => `
         <div class="history-item">
             <div><strong>${escapeHtml(h.game)}</strong> <span class="meta">• ${escapeHtml(h.method)} • saved ${escapeHtml(new Date(h.when).toLocaleString())} • for ${escapeHtml(h.draw)}</span></div>
-            <div class="lines">${h.lines.map(escapeHtml).join('\n')}</div>
+            <div class="lines">${historyLines(h)}</div>
             <div class="actions">
                 <button class="btn btn-ghost btn-small" data-hcopy="${i}" aria-label="Copy saved ticket">📋</button>
                 <button class="btn btn-ghost btn-small" data-hdel="${i}" aria-label="Delete saved ticket">🗑️</button>
@@ -1308,6 +1539,7 @@ function renderGame() {
     renderHeader(g, draw);
     renderFacts(g);
     renderCats(g, cats);
+    renderDraws();
     buildGrid(g, cats);
     renderToolUI();
     renderGenerate(g);
@@ -1509,6 +1741,28 @@ function bindEvents() {
     $('linesMinus').addEventListener('click', () => { state.lines = clamp(state.lines - 1, 1, MAX_LINES); renderGenerate(currentGame()); saveState(); });
     $('linesPlus').addEventListener('click', () => { state.lines = clamp(state.lines + 1, 1, MAX_LINES); renderGenerate(currentGame()); saveState(); });
     $('balanced').addEventListener('change', e => { state.balanced = e.target.checked; saveState(); });
+    $('avoidPast').addEventListener('change', e => { state.avoidPast = e.target.checked; saveState(); });
+    $('addDraws').addEventListener('click', addDraws);
+    $('drawsInput').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addDraws(); });
+    $('drawList').addEventListener('click', e => {
+        const b = e.target.closest('[data-ddel]');
+        if (!b) return;
+        const list = gameDraws();
+        const i = list.findIndex(d => String(d.added) === b.dataset.ddel);
+        if (i > -1) list.splice(i, 1);
+        drawsRev++;
+        saveState();
+        renderGame();
+        renderHistory();
+    });
+    $('clearDraws').addEventListener('click', () => {
+        if (!confirm(`Delete all entered results for ${currentGame().name}?`)) return;
+        state.draws[state.gameId] = [];
+        drawsRev++;
+        saveState();
+        renderGame();
+        renderHistory();
+    });
     $('generateBtn').addEventListener('click', generate);
 
     $('results').addEventListener('click', async e => {
@@ -1531,7 +1785,11 @@ function bindEvents() {
                 method: results.method.label,
                 when: Date.now(),
                 draw: results.draw,
-                lines: results.tickets.map((t, i) => `${'ABCDEFGHIJ'[i]}: ${ticketText(g, t)}`)
+                lines: results.tickets.map((t, i) => `${'ABCDEFGHIJ'[i]}: ${ticketText(g, t)}`),
+                gameId: state.gameId,
+                cycle: results.cycle,
+                digit: !!g.digit,
+                tickets: results.tickets
             });
             state.history = state.history.slice(0, 30);
             results.saved = true;
